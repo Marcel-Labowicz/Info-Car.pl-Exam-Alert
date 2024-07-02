@@ -1,21 +1,24 @@
 const fetch = require("node-fetch")
-const playwright = require('playwright');
+const playwright = require('playwright')
 const HttpsProxyAgent = require("https-proxy-agent")
 
-const notify = require("./utils/webhook");
-const config = require("./config");
+const notify = require("./utils/webhook")
+const config = require("./config")
 
 console.log('\033c')
 console.log(`Info-Car.pl Sniper Started!`)
 
-var token;
-var checking;
-var rateLimit;
+var token
+var checking
+var rateLimit
+
+// Set to store processed configurations in the current request
+let processedConfigs = new Set()
 
 const regenerateBearerToken = async () => {
-    checking = true;
-    const browser = await playwright['firefox'].launch({ headless: true });
-    const page = await browser.newPage({ viewport: null });
+    checking = true
+    const browser = await playwright['firefox'].launch({ headless: true })
+    const page = await browser.newPage({ viewport: null })
 
     page.route('**', route => {
         const request = route.request()
@@ -23,26 +26,26 @@ const regenerateBearerToken = async () => {
         if (headers.referer == "https://info-car.pl/new/prawo-jazdy/sprawdz-wolny-termin" && headers.authorization) {
             console.log('Successfully obtained bearer token!')
             token = headers.authorization
-            checking = false;
+            checking = false
             console.log('Back to checking free exams...')
-            return browser.close();
+            return browser.close()
         }
-        return route.continue();
-    });
+        return route.continue()
+    })
 
-    await page.goto('https://info-car.pl/oauth2/login'); // wait until page load
-    await page.type('.login-input', config.account.login);
-    await page.type('.password-input', config.account.password);
-    await page.click('#register-button'),
-        await page.waitForSelector('.ghost-btn', {
-            visible: true,
-        });
+    await page.goto('https://info-car.pl/oauth2/login') // wait until page load
+    await page.type('.login-input', config.account.login)
+    await page.type('.password-input', config.account.password)
+    await page.click('#register-button')
+    await page.waitForSelector('.ghost-btn', { visible: true })
     await page.goto('https://info-car.pl/new/prawo-jazdy/sprawdz-wolny-termin')
 }
 
 async function get() {
+    if (checking) return
 
-    if (checking) return;
+    // Clear the set of processed configurations for the new request cycle
+    processedConfigs = new Set()
 
     try {
         const data = await fetch("https://info-car.pl/api/word/word-centers/exam-schedule", {
@@ -61,38 +64,48 @@ async function get() {
 
         data.schedule.scheduledDays.forEach(days => {
             days.scheduledHours.forEach(async exam => {
-                if (exam.practiceExams.length < 1) return;
+                if (exam.practiceExams.length < 1) return
 
-                let examDateInMS = new Date(days.day.toString()).getTime();
+                let examDateInMS = new Date(days.day.toString()).getTime()
                 let maxTime = new Date().getTime() + (config.maxExamTime * 24 * 60 * 60 * 1000)
 
-                if (examDateInMS > maxTime) return;
+                if (examDateInMS > maxTime) return
 
-                if (rateLimit) return;
+                if (rateLimit) return
 
-                rateLimit = true;
+                // Check if the current configuration has already been processed in this request cycle
+                const configKey = `${days.day}-${exam.time}`
+                if (processedConfigs.has(configKey)) {
+                    console.log(`Notification not sent: Configuration ${configKey} was already processed in this request cycle.`)
+                    return
+                }
+
+                rateLimit = true
 
                 setTimeout(() => {
                     rateLimit = false
                 }, 30 * 1000)
 
-                return await notify[config.notifyVia](`Wolny egzamin na kategorie ${config.category} dnia ${days.day} na godzinę ${exam.time}`)
+                // Send notification
+                await notify[config.notifyVia](`Wolny egzamin na kategorie ${config.category} dnia ${days.day} na godzinę ${exam.time}`)
+                
+                // Add the current configuration to the set of processed configurations for this request cycle
+                processedConfigs.add(configKey)
             })
         })
     } catch (e) {
-        if (e.message.includes("ECONNRESET")) return;
+        if (e.message.includes("ECONNRESET")) return
 
         if (e.message.includes("Unexpected end")) {
             console.log("Invalid Bearer Token detected! Attempting to re-generate it...")
-            await regenerateBearerToken();
-            return get();
+            await regenerateBearerToken()
+            return get()
         }
     }
-
 }
 
-get();
+get()
 
 setInterval(() => {
-    get();
+    get()
 }, config.refreshTime * 1000)
